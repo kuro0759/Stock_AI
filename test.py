@@ -25,6 +25,16 @@ import shap
 import matplotlib.pyplot as plt
 import csv
 import os
+import warnings
+
+warnings.filterwarnings(
+    "ignore",
+    message="Could not find the number of physical cores",
+)
+warnings.filterwarnings(
+    "ignore",
+    message="FEATURE_DEPENDENCE::independent does not support interactions!",
+)
 
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import RandomizedSearchCV, TimeSeriesSplit
@@ -157,22 +167,40 @@ kmeans_obj = shap.kmeans(X_tr, KMEANS_N)
 background = kmeans_obj.data if hasattr(kmeans_obj, "data") else np.array(kmeans_obj)
 
 # 従来SHAP／I-SHAP ともに interventional モード
-explainer_shap = shap.TreeExplainer(
-    model,
-    data=background,
-    feature_perturbation="interventional"
-)
+try:
+    explainer_shap = shap.TreeExplainer(
+        model,
+        data=background,
+        feature_perturbation="interventional",
+        feature_dependence="interventional",
+    )
+except TypeError:
+    # for older shap versions that use feature_dependence
+    explainer_shap = shap.TreeExplainer(
+        model,
+        data=background,
+        feature_perturbation="interventional",
+    )
 shap_vals  = explainer_shap.shap_values(X_te)
 
-explainer_ishap = shap.TreeExplainer(
-    model,
-    data=background,
-    feature_perturbation="interventional"
-)
+try:
+    explainer_ishap = shap.TreeExplainer(
+        model,
+        data=background,
+        feature_perturbation="interventional",
+        feature_dependence="interventional",
+    )
+except TypeError:
+    explainer_ishap = shap.TreeExplainer(
+        model,
+        data=background,
+        feature_perturbation="interventional",
+    )
 ishap_vals = explainer_ishap.shap_interaction_values(X_te)
 
 mean_abs_shap  = np.abs(shap_vals).mean(axis=0)
-mean_abs_ishap = np.abs(ishap_vals).mean(axis=0)
+# I-SHAP の重要度は相互作用行列を特徴ごとに合計して取得
+mean_abs_ishap = np.abs(ishap_vals).sum(axis=2).mean(axis=0)
 
 baseline   = X_tr.mean(axis=0)
 orig_preds = model.predict(X_te)
