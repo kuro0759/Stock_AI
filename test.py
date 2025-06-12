@@ -24,6 +24,7 @@ import numpy as np
 import shap
 import matplotlib.pyplot as plt
 import csv
+import os
 
 from xgboost import XGBRegressor
 from sklearn.metrics import (
@@ -230,7 +231,8 @@ plt.savefig("prediction_vs_truth.png", dpi=300)
 plt.close()
 
 # 5-4. 上位要素を CSV に書き出し
-with open('top_shap_ishap_elements.csv', 'w', newline='', encoding='utf-8') as f:
+csv_path = os.path.join(os.path.dirname(__file__), 'top_shap_ishap_elements.csv')
+with open(csv_path, 'w', newline='', encoding='utf-8') as f:
     writer = csv.writer(f)
     writer.writerow(['K', 'SHAP_Top_Features', 'I-SHAP_Top_Features'])
     for K in range(MAX_K):
