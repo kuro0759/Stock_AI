@@ -77,6 +77,11 @@ data  = pd.concat([price, vol], axis=1).dropna()
 
 for t in TICKERS:
     data[f"{t}_MA5"] = data[f"{t}_Close"].rolling(5).mean()
+    data[f"{t}_MA20"] = data[f"{t}_Close"].rolling(20).mean()
+    data[f"{t}_Volatility"] = (
+        data[f"{t}_Close"].pct_change().rolling(14).std()
+    )
+    data[f"{t}_Return1D"] = data[f"{t}_Close"].pct_change()
     d = data[f"{t}_Close"].diff()
     up, dn = d.clip(lower=0), -d.clip(upper=0)
     mean_up = up.rolling(14).mean()
@@ -106,19 +111,21 @@ print("\n2. モデル学習・予測を開始...")
 
 # ハイパーパラメータチューニング
 param_dist = {
-    "n_estimators": [200, 300, 400],
-    "max_depth": [3, 4, 5],
-    "learning_rate": [0.05, 0.1, 0.2],
-    "subsample": [0.8, 1.0],
-    "colsample_bytree": [0.8, 1.0],
+    "n_estimators": [200, 300, 400, 500],
+    "max_depth": [3, 4, 5, 6, 7],
+    "learning_rate": [0.01, 0.05, 0.1, 0.2],
+    "subsample": [0.6, 0.8, 1.0],
+    "colsample_bytree": [0.6, 0.8, 1.0],
+    "min_child_weight": [1, 3, 5],
+    "gamma": [0, 0.1, 0.2],
 }
 base_model = XGBRegressor(random_state=42, tree_method="hist")
-cv = TimeSeriesSplit(n_splits=3)
+cv = TimeSeriesSplit(n_splits=5)
 search = RandomizedSearchCV(
     base_model,
     param_distributions=param_dist,
-    n_iter=10,
-    scoring="neg_mean_squared_error",
+    n_iter=20,
+    scoring="r2",
     cv=cv,
     n_jobs=-1,
     verbose=0,
@@ -126,7 +133,9 @@ search = RandomizedSearchCV(
 )
 search.fit(X_tr, y_tr)
 best_params = search.best_params_
+best_score = search.best_score_
 print(f"Best params: {best_params}")
+print(f"Cross-val R²: {best_score:.3f}")
 
 model = XGBRegressor(
     **best_params,
