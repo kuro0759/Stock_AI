@@ -26,6 +26,9 @@ import matplotlib.pyplot as plt
 import csv
 import os
 
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import RandomizedSearchCV, TimeSeriesSplit
+
 from xgboost import XGBRegressor
 from sklearn.metrics import (
     mean_absolute_error,
@@ -81,18 +84,45 @@ y = data[TARGET_COL].values
 split_idx = int(len(X) * (1 - TEST_SIZE))
 X_tr, X_te = X[:split_idx], X[split_idx:]
 y_tr, y_te = y[:split_idx], y[split_idx:]
+scaler = StandardScaler()
+X_tr = scaler.fit_transform(X_tr)
+X_te = scaler.transform(X_te)
 print(f"学習データ: {len(X_tr)} 件, テストデータ: {len(X_te)} 件")
 
 # ───────────────────────────────────────────────
 # 2. モデル学習・予測
 # ───────────────────────────────────────────────
 print("\n2. モデル学習・予測を開始...")
+
+# ハイパーパラメータチューニング
+param_dist = {
+    "n_estimators": [200, 300, 400],
+    "max_depth": [3, 4, 5],
+    "learning_rate": [0.05, 0.1, 0.2],
+    "subsample": [0.8, 1.0],
+    "colsample_bytree": [0.8, 1.0],
+}
+base_model = XGBRegressor(random_state=42, tree_method="hist")
+cv = TimeSeriesSplit(n_splits=3)
+search = RandomizedSearchCV(
+    base_model,
+    param_distributions=param_dist,
+    n_iter=10,
+    scoring="neg_mean_squared_error",
+    cv=cv,
+    n_jobs=-1,
+    verbose=0,
+    random_state=42,
+)
+search.fit(X_tr, y_tr)
+best_params = search.best_params_
+print(f"Best params: {best_params}")
+
 model = XGBRegressor(
-    n_estimators=100,
-    max_depth=3,
+    **best_params,
     random_state=42,
     tree_method="hist",
-    early_stopping_rounds=10
+    early_stopping_rounds=10,
 )
 model.fit(X_tr, y_tr, eval_set=[(X_te, y_te)], verbose=False)
 pred = model.predict(X_te)
