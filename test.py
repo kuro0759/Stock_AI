@@ -30,8 +30,6 @@ import logging
 
 logging.getLogger("shap").setLevel(logging.ERROR)
 
-
-
 warnings.filterwarnings(
     "ignore",
     message=r"Could not find the number of physical cores.*",
@@ -43,58 +41,107 @@ warnings.filterwarnings(
 
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import RandomizedSearchCV, TimeSeriesSplit
-
-from xgboost import XGBRegressor
-from sklearn.metrics import (
-    mean_absolute_error,
-    mean_squared_error,
-    r2_score
-)
+from sklearn.metrics import accuracy_score, roc_auc_score, precision_score, recall_score, f1_score
+from xgboost import XGBClassifier
 
 # ───────────────────────────────────────────────
 # 0. 定数設定
 # ───────────────────────────────────────────────
-TICKERS       = ["AAPL", "MSFT", "GOOG"]
-START_DATE    = "2000-01-01"
-END_DATE      = "2025-05-31"
+TICKERS = ["AAPL", "MSFT", "GOOG", "^VIX", "^GSPC", "^IXIC", "^TNX"]
+START_DATE = "2000-01-01"
+END_DATE = "2025-05-31"
 TARGET_TICKER = "AAPL"
-TARGET_COL    = f"{TARGET_TICKER}_Return"
-TEST_SIZE     = 0.2
-MAX_K         = 15
-KMEANS_N      = 100  # 背景データ要約サンプル数
+TARGET_COL = "Target_Dir"
+TEST_SIZE = 0.2
+MAX_K = 15
+KMEANS_N = 100  # 背景データ要約サンプル数
 
 # ───────────────────────────────────────────────
 # 1. データ取得・前処理
 # ───────────────────────────────────────────────
 print("1. データ取得・前処理を開始...")
+
 df = yf.download(
     TICKERS,
     start=START_DATE,
     end=END_DATE,
     interval="1d",
     auto_adjust=True,
-    threads=True
+    threads=True,
 )
 
-price = df["Close"].rename(columns=lambda c: f"{c}_Close")
-vol   = df["Volume"].rename(columns=lambda c: f"{c}_Volume")
-data  = pd.concat([price, vol], axis=1).dropna()
+open_p = df["Open"].rename(columns=lambda c: f"{c}_Open")
+high_p = df["High"].rename(columns=lambda c: f"{c}_High")
+low_p = df["Low"].rename(columns=lambda c: f"{c}_Low")
+close_p = df["Close"].rename(columns=lambda c: f"{c}_Close")
+vol_p = df.get("Volume")
+if vol_p is not None:
+    vol_p = vol_p.rename(columns=lambda c: f"{c}_Volume")
+
+frames = [open_p, high_p, low_p, close_p]
+if vol_p is not None:
+    frames.append(vol_p)
+
+data = pd.concat(frames, axis=1).dropna()
 
 for t in TICKERS:
-    data[f"{t}_MA5"] = data[f"{t}_Close"].rolling(5).mean()
-    data[f"{t}_MA20"] = data[f"{t}_Close"].rolling(20).mean()
-    data[f"{t}_Volatility"] = (
-        data[f"{t}_Close"].pct_change().rolling(14).std()
-    )
-    data[f"{t}_Return1D"] = data[f"{t}_Close"].pct_change()
-    d = data[f"{t}_Close"].diff()
+    close_col = f"{t}_Close"
+    high_col = f"{t}_High"
+    low_col = f"{t}_Low"
+
+    data[f"{t}_MA5"] = data[close_col].rolling(5).mean()
+    data[f"{t}_MA20"] = data[close_col].rolling(20).mean()
+    data[f"{t}_Volatility"] = data[close_col].pct_change().rolling(14).std()
+    data[f"{t}_Return1D"] = data[close_col].pct_change()
+    d = data[close_col].diff()
     up, dn = d.clip(lower=0), -d.clip(upper=0)
     mean_up = up.rolling(14).mean()
     mean_dn = dn.rolling(14).mean()
     rs = mean_up / mean_dn.replace(0, np.nan)
-    data[f"{t}_RSI"] = 100 - 100/(1 + rs)
+    data[f"{t}_RSI"] = 100 - 100 / (1 + rs)
 
-data[TARGET_COL] = data[f"{TARGET_TICKER}_Close"].pct_change().shift(-1)
+    ema12 = data[close_col].ewm(span=12, adjust=False).mean()
+    ema26 = data[close_col].ewm(span=26, adjust=False).mean()
+    macd = ema12 - ema26
+    signal = macd.ewm(span=9, adjust=False).mean()
+    data[f"{t}_MACD"] = macd
+    data[f"{t}_MACD_signal"] = signal
+    data[f"{t}_MACD_hist"] = macd - signal
+
+    ma20 = data[close_col].rolling(20).mean()
+    std20 = data[close_col].rolling(20).std()
+    upper = ma20 + 2 * std20
+    lower = ma20 - 2 * std20
+    data[f"{t}_BB_pct"] = (data[close_col] - lower) / (upper - lower)
+
+    high14 = data[high_col].rolling(14).max()
+    low14 = data[low_col].rolling(14).min()
+    k = (data[close_col] - low14) / (high14 - low14)
+    data[f"{t}_Stoch_K"] = k
+    data[f"{t}_Stoch_D"] = k.rolling(3).mean()
+
+    tr = pd.concat([
+        data[high_col] - data[low_col],
+        (data[high_col] - data[close_col].shift()).abs(),
+        (data[low_col] - data[close_col].shift()).abs(),
+    ], axis=1).max(axis=1)
+    data[f"{t}_ATR"] = tr.rolling(14).mean()
+
+    tenkan = (data[high_col].rolling(9).max() + data[low_col].rolling(9).min()) / 2
+    kijun = (data[high_col].rolling(26).max() + data[low_col].rolling(26).min()) / 2
+    data[f"{t}_Tenkan"] = tenkan
+    data[f"{t}_Kijun"] = kijun
+
+for lag in [1, 2, 3, 5, 10]:
+    data[f"{TARGET_TICKER}_Return_lag_{lag}"] = data[f"{TARGET_TICKER}_Return1D"].shift(lag)
+
+WINDOW_SIZE = 20
+data[f"{TARGET_TICKER}_Volatility_{WINDOW_SIZE}d"] = data[f"{TARGET_TICKER}_Close"].rolling(WINDOW_SIZE).std()
+data[f"{TARGET_TICKER}_High_vs_{WINDOW_SIZE}d"] = data[f"{TARGET_TICKER}_Close"] / data[f"{TARGET_TICKER}_Close"].rolling(WINDOW_SIZE).max()
+
+target_ret = data[f"{TARGET_TICKER}_Close"].pct_change().shift(-1)
+data[TARGET_COL] = (target_ret > 0).astype(int)
+
 data = data.dropna()
 
 feature_names = list(data.drop(columns=TARGET_COL).columns)
@@ -104,17 +151,27 @@ y = data[TARGET_COL].values
 split_idx = int(len(X) * (1 - TEST_SIZE))
 X_tr, X_te = X[:split_idx], X[split_idx:]
 y_tr, y_te = y[:split_idx], y[split_idx:]
+
 scaler = StandardScaler()
 X_tr = scaler.fit_transform(X_tr)
 X_te = scaler.transform(X_te)
 print(f"学習データ: {len(X_tr)} 件, テストデータ: {len(X_te)} 件")
+
+# クラス分布の確認と scale_pos_weight 設定
+class_counts = pd.Series(y_tr).value_counts()
+pos_weight = (
+    class_counts.get(0, 0) / class_counts.get(1, 1)
+    if class_counts.get(1, 0) != 0
+    else 1.0
+)
+print(f"クラス分布: {class_counts.to_dict()}")
+print(f"scale_pos_weight: {pos_weight:.2f}")
 
 # ───────────────────────────────────────────────
 # 2. モデル学習・予測
 # ───────────────────────────────────────────────
 print("\n2. モデル学習・予測を開始...")
 
-# ハイパーパラメータチューニング
 param_dist = {
     "n_estimators": [200, 300, 400, 500],
     "max_depth": [3, 4, 5, 6, 7],
@@ -124,118 +181,118 @@ param_dist = {
     "min_child_weight": [1, 3, 5],
     "gamma": [0, 0.1, 0.2],
 }
-base_model = XGBRegressor(random_state=42, tree_method="hist")
+base_model = XGBClassifier(
+    random_state=42,
+    tree_method="hist",
+    eval_metric="logloss",
+    scale_pos_weight=pos_weight,
+)
 cv = TimeSeriesSplit(n_splits=5)
 search = RandomizedSearchCV(
     base_model,
     param_distributions=param_dist,
     n_iter=20,
-    scoring="r2",
+    scoring="roc_auc",
     cv=cv,
     n_jobs=-1,
-    verbose=0,
     random_state=42,
+    verbose=0,
 )
 search.fit(X_tr, y_tr)
 best_params = search.best_params_
 best_score = search.best_score_
 print(f"Best params: {best_params}")
-print(f"Cross-val R²: {best_score:.3f}")
+print(f"Cross-val AUC: {best_score:.3f}")
 
-model = XGBRegressor(
+model = XGBClassifier(
     **best_params,
     random_state=42,
     tree_method="hist",
+    eval_metric="logloss",
     early_stopping_rounds=10,
+    scale_pos_weight=pos_weight,
 )
 model.fit(X_tr, y_tr, eval_set=[(X_te, y_te)], verbose=False)
-pred = model.predict(X_te)
+pred_proba = model.predict_proba(X_te)[:, 1]
+pred_label = (pred_proba > 0.5).astype(int)
 print("学習・予測が完了しました。")
 
 # ───────────────────────────────────────────────
 # 3. モデル性能評価
 # ───────────────────────────────────────────────
 print("\n3. モデル性能評価:")
-mae = mean_absolute_error(y_te, pred)
-mse = mean_squared_error(y_te, pred)
-rmse = np.sqrt(mse)
-r2 = r2_score(y_te, pred)
-dir_acc = ((pred * y_te) > 0).mean()
-mask = (y_te != 0)
-mape = np.mean(np.abs((y_te[mask] - pred[mask]) / y_te[mask])) * 100 if mask.sum()>0 else np.nan
-
-print(f"MAE     : {mae:.5f}")
-print(f"RMSE    : {rmse:.5f}")
-print(f"MAPE    : {mape:.3f}%")
-print(f"R²      : {r2:.3f}")
-print(f"DirAcc  : {dir_acc:.3f}")
-
-import os
-import warnings
-import contextlib
-import sys
-
-# （省略）imports
+acc = accuracy_score(y_te, pred_label)
+auc = roc_auc_score(y_te, pred_proba)
+precision = precision_score(y_te, pred_label)
+recall = recall_score(y_te, pred_label)
+f1 = f1_score(y_te, pred_label)
+print(f"Accuracy : {acc:.3f}")
+print(f"AUC      : {auc:.3f}")
+print(f"Precision: {precision:.3f}")
+print(f"Recall   : {recall:.3f}")
+print(f"F1       : {f1:.3f}")
 
 # ───────────────────────────────────────────────
 # 4. SHAP / I-SHAP 計算
 # ───────────────────────────────────────────────
 print("\n4. SHAP / I-SHAP の計算を開始...（時間がかかる場合があります）")
 
-# kmeans で要約した背景データ（numpy array）を取得
 kmeans_obj = shap.kmeans(X_tr, KMEANS_N)
 background = getattr(kmeans_obj, "data", np.array(kmeans_obj))
 
 explainer_shap = shap.TreeExplainer(
     model,
     data=background,
-    feature_perturbation="interventional"
+    feature_perturbation="interventional",
 )
 explainer_ishap = shap.TreeExplainer(
     model,
     data=background,
-    feature_perturbation="interventional"
+    feature_perturbation="interventional",
 )
 
-# --- ここから stderr を無視 ---
+import contextlib
 with open(os.devnull, "w") as fnull:
     with contextlib.redirect_stderr(fnull):
-        shap_vals  = explainer_shap.shap_values(X_te)
+        shap_vals = explainer_shap.shap_values(X_te)
         ishap_vals = explainer_ishap.shap_interaction_values(X_te)
-# --- ここまで ---
 
-mean_abs_shap  = np.abs(shap_vals).mean(axis=0)
+if isinstance(shap_vals, list):
+    shap_vals = shap_vals[0]
+if isinstance(ishap_vals, list):
+    ishap_vals = ishap_vals[0]
+
+mean_abs_shap = np.abs(shap_vals).mean(axis=0)
 mean_abs_ishap = np.abs(ishap_vals).sum(axis=2).mean(axis=0)
-# （以下、Completeness/Fidelity の算出に続く）
 
-
-baseline   = X_tr.mean(axis=0)
-orig_preds = model.predict(X_te)
+baseline = X_tr.mean(axis=0)
+orig_preds = pred_proba
 
 def fidelity(mask_idx):
-    if len(mask_idx)==0:
+    if len(mask_idx) == 0:
         return 0.0
     Xc = X_te.copy()
     Xc[:, mask_idx] = baseline[mask_idx]
-    return mean_absolute_error(orig_preds, model.predict(Xc))
+    return np.mean(np.abs(orig_preds - model.predict_proba(Xc)[:, 1]))
 
-# Completeness / Fidelity を K=0~MAX_K-1 で算出
 results = []
 for K in range(MAX_K):
-    top_sh = np.argsort(mean_abs_shap)[-K:] if K>0 else []
-    comp_s = mean_abs_shap[top_sh].sum() / mean_abs_shap.sum() if mean_abs_shap.sum()>0 else 0
+    top_sh = np.argsort(mean_abs_shap)[-K:] if K > 0 else []
+    comp_s = mean_abs_shap[top_sh].sum() / mean_abs_shap.sum() if mean_abs_shap.sum() > 0 else 0
     bot_sh = [i for i in range(len(mean_abs_shap)) if i not in top_sh]
     fid_s = fidelity(bot_sh)
 
-    top_ish = np.argsort(mean_abs_ishap)[-K:] if K>0 else []
-    comp_i  = mean_abs_ishap[top_ish].sum() / mean_abs_ishap.sum() if mean_abs_ishap.sum()>0 else 0
+    top_ish = np.argsort(mean_abs_ishap)[-K:] if K > 0 else []
+    comp_i = mean_abs_ishap[top_ish].sum() / mean_abs_ishap.sum() if mean_abs_ishap.sum() > 0 else 0
     bot_ish = [i for i in range(len(mean_abs_ishap)) if i not in top_ish]
     fid_i = fidelity(bot_ish)
 
     results.append({
         "K": K,
-        "Comp_SHAP": comp_s, "Fid_SHAP": fid_s,
-        "Comp_ISHAP": comp_i, "Fid_ISHAP": fid_i
+        "Comp_SHAP": comp_s,
+        "Fid_SHAP": fid_s,
+        "Comp_ISHAP": comp_i,
+        "Fid_ISHAP": fid_i,
     })
 
 df_res = pd.DataFrame(results)
@@ -246,15 +303,14 @@ print("計算が完了しました。")
 # ───────────────────────────────────────────────
 print("\n5. グラフとCSVファイルを出力します...")
 
-# 5-1. 棒グラフ (Fidelity)
-k_list = [5, 10, MAX_K-1]
-df_plot = df_res[df_res['K'].isin(k_list)]
+k_list = [5, 10, MAX_K - 1]
+df_plot = df_res[df_res["K"].isin(k_list)]
 x = np.arange(len(k_list))
 
-plt.figure(figsize=(8,4))
+plt.figure(figsize=(8, 4))
 bar_w = 0.35
-plt.bar(x - bar_w/2, df_plot['Fid_SHAP'], bar_w, label="Fidelity (SHAP)")
-plt.bar(x + bar_w/2, df_plot['Fid_ISHAP'], bar_w, label="Fidelity (I-SHAP)")
+plt.bar(x - bar_w / 2, df_plot["Fid_SHAP"], bar_w, label="Fidelity (SHAP)")
+plt.bar(x + bar_w / 2, df_plot["Fid_ISHAP"], bar_w, label="Fidelity (I-SHAP)")
 plt.xticks(x, k_list)
 plt.xlabel("K (Top features count)")
 plt.ylabel("Fidelity (MAE)")
@@ -264,15 +320,14 @@ plt.tight_layout()
 plt.savefig("shap-ishap_fidelity_bar.png", dpi=300)
 plt.close()
 
-# 5-2. ラインプロット (Completeness & Fidelity vs K)
-fig, (ax1, ax2) = plt.subplots(2,1, figsize=(8,8), sharex=True)
-ax1.plot(df_res['K'], df_res['Comp_SHAP'], '-o', label="Completeness (SHAP)")
-ax1.plot(df_res['K'], df_res['Comp_ISHAP'], '--s', label="Completeness (I-SHAP)")
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 8), sharex=True)
+ax1.plot(df_res["K"], df_res["Comp_SHAP"], "-o", label="Completeness (SHAP)")
+ax1.plot(df_res["K"], df_res["Comp_ISHAP"], "--s", label="Completeness (I-SHAP)")
 ax1.set_ylabel("Completeness")
 ax1.legend(); ax1.grid(True)
 
-ax2.plot(df_res['K'], df_res['Fid_SHAP'], '-o', label="Fidelity (SHAP)")
-ax2.plot(df_res['K'], df_res['Fid_ISHAP'], '--s', label="Fidelity (I-SHAP)")
+ax2.plot(df_res["K"], df_res["Fid_SHAP"], "-o", label="Fidelity (SHAP)")
+ax2.plot(df_res["K"], df_res["Fid_ISHAP"], "--s", label="Fidelity (I-SHAP)")
 ax2.set_ylabel("Fidelity (MAE)")
 ax2.set_xlabel("K (Top features count)")
 ax2.legend(); ax2.grid(True)
@@ -281,29 +336,27 @@ plt.tight_layout()
 plt.savefig("completeness_fidelity_vs_k.png", dpi=300)
 plt.close()
 
-# 5-3. 予測推移プロット
-pred_tr = model.predict(X_tr)
-plt.figure(figsize=(10,5))
+pred_tr = model.predict_proba(X_tr)[:, 1]
+plt.figure(figsize=(10, 5))
 plt.plot(np.arange(len(y)), y, color="gray", label="Truth")
 plt.plot(np.arange(len(pred_tr)), pred_tr, color="green", label="Prediction (Train)")
-plt.plot(np.arange(len(pred_tr), len(y)), pred, color="red", label="Prediction (Test)")
+plt.plot(np.arange(len(pred_tr), len(y)), pred_proba, color="red", label="Prediction (Test)")
 plt.axvline(x=split_idx, color="blue", linestyle="--", label="Train/Test Split")
-plt.title(f"Prediction vs Truth (Test R²: {r2:.3f})")
+plt.title(f"Prediction vs Truth (Test AUC: {auc:.3f})")
 plt.xlabel("Time index")
-plt.ylabel("Return")
+plt.ylabel("Probability")
 plt.legend(); plt.tight_layout()
 plt.savefig("prediction_vs_truth.png", dpi=300)
 plt.close()
 
-# 5-4. 上位要素を CSV に書き出し
-csv_path = os.path.join(os.path.dirname(__file__), 'top_shap_ishap_elements.csv')
-with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+csv_path = os.path.join(os.path.dirname(__file__), "top_shap_ishap_elements.csv")
+with open(csv_path, "w", newline="", encoding="utf-8") as f:
     writer = csv.writer(f)
-    writer.writerow(['K', 'SHAP_Top_Features', 'I-SHAP_Top_Features'])
+    writer.writerow(["K", "SHAP_Top_Features", "I-SHAP_Top_Features"])
     for K in range(MAX_K):
-        top_sh = np.argsort(mean_abs_shap)[-K:][::-1] if K>0 else []
-        top_ish = np.argsort(mean_abs_ishap)[-K:][::-1] if K>0 else []
-        sh_feats  = "; ".join(feature_names[i] for i in top_sh)
+        top_sh = np.argsort(mean_abs_shap)[-K:][::-1] if K > 0 else []
+        top_ish = np.argsort(mean_abs_ishap)[-K:][::-1] if K > 0 else []
+        sh_feats = "; ".join(feature_names[i] for i in top_sh)
         ish_feats = "; ".join(feature_names[i] for i in top_ish)
         writer.writerow([K, sh_feats, ish_feats])
 
