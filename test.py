@@ -157,6 +157,16 @@ X_tr = scaler.fit_transform(X_tr)
 X_te = scaler.transform(X_te)
 print(f"学習データ: {len(X_tr)} 件, テストデータ: {len(X_te)} 件")
 
+# クラス分布の確認と scale_pos_weight 設定
+class_counts = pd.Series(y_tr).value_counts()
+pos_weight = (
+    class_counts.get(0, 0) / class_counts.get(1, 1)
+    if class_counts.get(1, 0) != 0
+    else 1.0
+)
+print(f"クラス分布: {class_counts.to_dict()}")
+print(f"scale_pos_weight: {pos_weight:.2f}")
+
 # ───────────────────────────────────────────────
 # 2. モデル学習・予測
 # ───────────────────────────────────────────────
@@ -171,8 +181,12 @@ param_dist = {
     "min_child_weight": [1, 3, 5],
     "gamma": [0, 0.1, 0.2],
 }
-
-base_model = XGBClassifier(random_state=42, tree_method="hist", eval_metric="logloss")
+base_model = XGBClassifier(
+    random_state=42,
+    tree_method="hist",
+    eval_metric="logloss",
+    scale_pos_weight=pos_weight,
+)
 cv = TimeSeriesSplit(n_splits=5)
 search = RandomizedSearchCV(
     base_model,
@@ -196,6 +210,7 @@ model = XGBClassifier(
     tree_method="hist",
     eval_metric="logloss",
     early_stopping_rounds=10,
+    scale_pos_weight=pos_weight,
 )
 model.fit(X_tr, y_tr, eval_set=[(X_te, y_te)], verbose=False)
 pred_proba = model.predict_proba(X_te)[:, 1]
