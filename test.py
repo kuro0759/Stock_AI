@@ -29,11 +29,11 @@ import warnings
 
 warnings.filterwarnings(
     "ignore",
-    message="Could not find the number of physical cores",
+    message=r"Could not find the number of physical cores.*",
 )
 warnings.filterwarnings(
     "ignore",
-    message="FEATURE_DEPENDENCE::independent does not support interactions!",
+    message=r"FEATURE_DEPENDENCE::independent.*",
 )
 
 from sklearn.preprocessing import StandardScaler
