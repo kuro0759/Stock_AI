@@ -24,6 +24,25 @@ import numpy as np
 import shap
 import matplotlib.pyplot as plt
 import csv
+import os
+import warnings
+import logging
+
+logging.getLogger("shap").setLevel(logging.ERROR)
+
+
+
+warnings.filterwarnings(
+    "ignore",
+    message=r"Could not find the number of physical cores.*",
+)
+warnings.filterwarnings(
+    "ignore",
+    message=r"FEATURE_DEPENDENCE::independent.*",
+)
+
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import RandomizedSearchCV, TimeSeriesSplit
 
 from xgboost import XGBRegressor
 from sklearn.metrics import (
@@ -63,6 +82,11 @@ data  = pd.concat([price, vol], axis=1).dropna()
 
 for t in TICKERS:
     data[f"{t}_MA5"] = data[f"{t}_Close"].rolling(5).mean()
+    data[f"{t}_MA20"] = data[f"{t}_Close"].rolling(20).mean()
+    data[f"{t}_Volatility"] = (
+        data[f"{t}_Close"].pct_change().rolling(14).std()
+    )
+    data[f"{t}_Return1D"] = data[f"{t}_Close"].pct_change()
     d = data[f"{t}_Close"].diff()
     up, dn = d.clip(lower=0), -d.clip(upper=0)
     mean_up = up.rolling(14).mean()
@@ -80,18 +104,49 @@ y = data[TARGET_COL].values
 split_idx = int(len(X) * (1 - TEST_SIZE))
 X_tr, X_te = X[:split_idx], X[split_idx:]
 y_tr, y_te = y[:split_idx], y[split_idx:]
+scaler = StandardScaler()
+X_tr = scaler.fit_transform(X_tr)
+X_te = scaler.transform(X_te)
 print(f"学習データ: {len(X_tr)} 件, テストデータ: {len(X_te)} 件")
 
 # ───────────────────────────────────────────────
 # 2. モデル学習・予測
 # ───────────────────────────────────────────────
 print("\n2. モデル学習・予測を開始...")
+
+# ハイパーパラメータチューニング
+param_dist = {
+    "n_estimators": [200, 300, 400, 500],
+    "max_depth": [3, 4, 5, 6, 7],
+    "learning_rate": [0.01, 0.05, 0.1, 0.2],
+    "subsample": [0.6, 0.8, 1.0],
+    "colsample_bytree": [0.6, 0.8, 1.0],
+    "min_child_weight": [1, 3, 5],
+    "gamma": [0, 0.1, 0.2],
+}
+base_model = XGBRegressor(random_state=42, tree_method="hist")
+cv = TimeSeriesSplit(n_splits=5)
+search = RandomizedSearchCV(
+    base_model,
+    param_distributions=param_dist,
+    n_iter=20,
+    scoring="r2",
+    cv=cv,
+    n_jobs=-1,
+    verbose=0,
+    random_state=42,
+)
+search.fit(X_tr, y_tr)
+best_params = search.best_params_
+best_score = search.best_score_
+print(f"Best params: {best_params}")
+print(f"Cross-val R²: {best_score:.3f}")
+
 model = XGBRegressor(
-    n_estimators=100,
-    max_depth=3,
+    **best_params,
     random_state=42,
     tree_method="hist",
-    early_stopping_rounds=10
+    early_stopping_rounds=10,
 )
 model.fit(X_tr, y_tr, eval_set=[(X_te, y_te)], verbose=False)
 pred = model.predict(X_te)
@@ -115,33 +170,44 @@ print(f"MAPE    : {mape:.3f}%")
 print(f"R²      : {r2:.3f}")
 print(f"DirAcc  : {dir_acc:.3f}")
 
+import os
+import warnings
+import contextlib
+import sys
+
+# （省略）imports
+
 # ───────────────────────────────────────────────
 # 4. SHAP / I-SHAP 計算
 # ───────────────────────────────────────────────
 print("\n4. SHAP / I-SHAP の計算を開始...（時間がかかる場合があります）")
 
-# ─ kmeans で要約した背景データ（numpy array）を取得 ─
+# kmeans で要約した背景データ（numpy array）を取得
 kmeans_obj = shap.kmeans(X_tr, KMEANS_N)
-# shap 0.42 では kmeans_obj.data, 古いバージョンではそのまま ndarray の場合があるため
-background = kmeans_obj.data if hasattr(kmeans_obj, "data") else np.array(kmeans_obj)
+background = getattr(kmeans_obj, "data", np.array(kmeans_obj))
 
-# 従来SHAP／I-SHAP ともに interventional モード
 explainer_shap = shap.TreeExplainer(
     model,
     data=background,
     feature_perturbation="interventional"
 )
-shap_vals  = explainer_shap.shap_values(X_te)
-
 explainer_ishap = shap.TreeExplainer(
     model,
     data=background,
     feature_perturbation="interventional"
 )
-ishap_vals = explainer_ishap.shap_interaction_values(X_te)
+
+# --- ここから stderr を無視 ---
+with open(os.devnull, "w") as fnull:
+    with contextlib.redirect_stderr(fnull):
+        shap_vals  = explainer_shap.shap_values(X_te)
+        ishap_vals = explainer_ishap.shap_interaction_values(X_te)
+# --- ここまで ---
 
 mean_abs_shap  = np.abs(shap_vals).mean(axis=0)
-mean_abs_ishap = np.abs(ishap_vals).mean(axis=0)
+mean_abs_ishap = np.abs(ishap_vals).sum(axis=2).mean(axis=0)
+# （以下、Completeness/Fidelity の算出に続く）
+
 
 baseline   = X_tr.mean(axis=0)
 orig_preds = model.predict(X_te)
@@ -230,7 +296,8 @@ plt.savefig("prediction_vs_truth.png", dpi=300)
 plt.close()
 
 # 5-4. 上位要素を CSV に書き出し
-with open('top_shap_ishap_elements.csv', 'w', newline='', encoding='utf-8') as f:
+csv_path = os.path.join(os.path.dirname(__file__), 'top_shap_ishap_elements.csv')
+with open(csv_path, 'w', newline='', encoding='utf-8') as f:
     writer = csv.writer(f)
     writer.writerow(['K', 'SHAP_Top_Features', 'I-SHAP_Top_Features'])
     for K in range(MAX_K):
