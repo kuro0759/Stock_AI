@@ -8,10 +8,11 @@ import numpy as np
 
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import accuracy_score, roc_auc_score
-from sklearn.model_selection import TimeSeriesSplit, RandomizedSearchCV
+from sklearn.model_selection import TimeSeriesSplit, RandomizedSearchCV, train_test_split
 from sklearn.linear_model import LogisticRegression
 from xgboost import XGBClassifier
 from lightgbm import LGBMClassifier
+import lightgbm as lgb
 from catboost import CatBoostClassifier
 
 # 時系列モデルライブラリ
@@ -97,6 +98,11 @@ scaler = StandardScaler()
 X_tr_scaled = scaler.fit_transform(X_tr)
 X_te_scaled = scaler.transform(X_te)
 
+# 学習データをさらに学習用と評価用に分割
+X_train_part, X_val, y_train_part, y_val = train_test_split(
+    X_tr_scaled, y_tr, test_size=0.2, random_state=42
+)
+
 # 時系列予測用データ
 ts_df = df['Close'][[TARGET_TICKER]].reset_index()
 ts_df.columns = ['ds', 'y']
@@ -107,8 +113,7 @@ y_true_dir = (ts_test['y'].values > ts_test['y'].shift(1).values).astype(int)[1:
 # 結果格納リスト
 results_list = []
 
-print('
-2. テーブルデータ系モデルのチューニングと評価 ...')
+print('2. テーブルデータ系モデルのチューニングと評価 ...')
 pos_weight = (y_tr == 0).sum() / (y_tr == 1).sum()
 cv = TimeSeriesSplit(n_splits=3)
 
@@ -127,8 +132,39 @@ models = [
 
 for name, base_model, params in models:
     search = RandomizedSearchCV(base_model, params, n_iter=2, cv=cv, scoring='accuracy', random_state=42)
-    search.fit(X_tr_scaled, y_tr)
+    search.fit(X_train_part, y_train_part)
     best_model = search.best_estimator_
+
+    # 評価用データを指定して途中経過を表示しながら学習
+    if name == 'XGBoost':
+        print("--- XGBoostの学習 ---")
+        best_model.fit(
+            X_train_part,
+            y_train_part,
+            eval_set=[(X_val, y_val)],
+            verbose=100,
+            early_stopping_rounds=20,
+        )
+    elif name == 'LightGBM':
+        print("\n--- LightGBMの学習 ---")
+        best_model.fit(
+            X_train_part,
+            y_train_part,
+            eval_set=[(X_val, y_val)],
+            callbacks=[lgb.early_stopping(20), lgb.log_evaluation(period=100)],
+        )
+    elif name == 'CatBoost':
+        print("\n--- CatBoostの学習 ---")
+        best_model.fit(
+            X_train_part,
+            y_train_part,
+            eval_set=[(X_val, y_val)],
+            verbose=100,
+            early_stopping_rounds=20,
+        )
+    else:
+        best_model.fit(X_train_part, y_train_part)
+
     pred = best_model.predict(X_te_scaled)
     acc = accuracy_score(y_te, pred)
     try:
@@ -138,8 +174,7 @@ for name, base_model, params in models:
         auc = np.nan
     results_list.append({'Model': name, 'Accuracy': acc, 'AUC': auc})
 
-print('
-3. 一般的な時系列モデルの評価 ...')
+print('3. 一般的な時系列モデルの評価 ...')
 if _statsmodels_available:
     # Holt-Winters
     hw_model = ExponentialSmoothing(ts_train['y'], trend='add', seasonal='add', seasonal_periods=252).fit()
