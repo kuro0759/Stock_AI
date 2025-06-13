@@ -48,13 +48,16 @@ from xgboost import XGBClassifier
 # 0. 定数設定
 # ───────────────────────────────────────────────
 TICKERS = ["AAPL", "MSFT", "GOOG", "^VIX", "^GSPC", "^IXIC", "^TNX"]
-START_DATE = "2000-01-01"
-END_DATE = "2025-05-31"
+START_DATE = "2016-01-01"
+END_DATE = "2022-12-01"
 TARGET_TICKER = "AAPL"
 TARGET_COL = "Target_Dir"
-TEST_SIZE = 0.2
+TEST_SIZE = 0.3
 MAX_K = 15
-KMEANS_N = 100  # 背景データ要約サンプル数
+KMEANS_N = 20  # 背景データ要約サンプル数
+# 分析モード: "effect_vs_interaction" または "obs_vs_intervention"
+#ANALYSIS_MODE = "effect_vs_interaction"
+ANALYSIS_MODE = "obs_vs_intervention"
 
 # ───────────────────────────────────────────────
 # 1. データ取得・前処理
@@ -173,13 +176,13 @@ print(f"scale_pos_weight: {pos_weight:.2f}")
 print("\n2. モデル学習・予測を開始...")
 
 param_dist = {
-    "n_estimators": [200, 300, 400, 500],
-    "max_depth": [3, 4, 5, 6, 7],
-    "learning_rate": [0.01, 0.05, 0.1, 0.2],
-    "subsample": [0.6, 0.8, 1.0],
-    "colsample_bytree": [0.6, 0.8, 1.0],
-    "min_child_weight": [1, 3, 5],
-    "gamma": [0, 0.1, 0.2],
+    "n_estimators": [300, 400, 500, 600, 700],
+    "max_depth": [3, 4, 5, 6, 7, 8, 9, 10],
+    "learning_rate": [0.01, 0.05, 0.1, 0.15, 0.2],
+    "subsample": [0.6, 0.7, 0.8, 0.9, 1.0],
+    "colsample_bytree": [0.6, 0.8, 0.9, 1.0],
+    "min_child_weight": [1, 3, 5, 7, 9],
+    "gamma": [0, 0.05, 0.1, 0.15, 0.2],
 }
 base_model = XGBClassifier(
     random_state=42,
@@ -240,22 +243,37 @@ print("\n4. SHAP / I-SHAP の計算を開始...（時間がかかる場合があ
 kmeans_obj = shap.kmeans(X_tr, KMEANS_N)
 background = getattr(kmeans_obj, "data", np.array(kmeans_obj))
 
-explainer_shap = shap.TreeExplainer(
-    model,
-    data=background,
-    feature_perturbation="interventional",
-)
-explainer_ishap = shap.TreeExplainer(
-    model,
-    data=background,
-    feature_perturbation="interventional",
-)
+if ANALYSIS_MODE == "effect_vs_interaction":
+    explainer_shap = shap.TreeExplainer(
+        model,
+        data=background,
+        feature_perturbation="interventional",
+    )
+    explainer_ishap = shap.TreeExplainer(
+        model,
+        data=background,
+        feature_perturbation="interventional",
+    )
+else:  # "obs_vs_intervention"
+    explainer_shap = shap.TreeExplainer(
+        model,
+        data=background,
+        feature_perturbation="tree_path_dependent",
+    )
+    explainer_ishap = shap.TreeExplainer(
+        model,
+        data=background,
+        feature_perturbation="interventional",
+    )
 
 import contextlib
 with open(os.devnull, "w") as fnull:
     with contextlib.redirect_stderr(fnull):
         shap_vals = explainer_shap.shap_values(X_te)
-        ishap_vals = explainer_ishap.shap_interaction_values(X_te)
+        if ANALYSIS_MODE == "effect_vs_interaction":
+            ishap_vals = explainer_ishap.shap_interaction_values(X_te)
+        else:
+            ishap_vals = explainer_ishap.shap_values(X_te)
 
 if isinstance(shap_vals, list):
     shap_vals = shap_vals[0]
@@ -263,7 +281,10 @@ if isinstance(ishap_vals, list):
     ishap_vals = ishap_vals[0]
 
 mean_abs_shap = np.abs(shap_vals).mean(axis=0)
-mean_abs_ishap = np.abs(ishap_vals).sum(axis=2).mean(axis=0)
+if ANALYSIS_MODE == "effect_vs_interaction":
+    mean_abs_ishap = np.abs(ishap_vals).sum(axis=2).mean(axis=0)
+else:
+    mean_abs_ishap = np.abs(ishap_vals).mean(axis=0)
 
 baseline = X_tr.mean(axis=0)
 orig_preds = pred_proba
