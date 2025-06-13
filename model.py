@@ -20,7 +20,13 @@ from catboost import CatBoostClassifier
 # pip install prophet statsmodels tbats
 from prophet import Prophet
 from statsmodels.tsa.api import ExponentialSmoothing, ARIMA
-from tbats import TBATS
+try:
+    from tbats import TBATS
+    _tbats_available = True
+except Exception as e:  # noqa: E722 - handle any import error including binary issues
+    TBATS = None
+    _tbats_available = False
+    _tbats_error = e
 
 # ───────────────────────────────────────────────
 # 0. 定数設定
@@ -125,16 +131,19 @@ acc_arima = accuracy_score(y_true_dir, pred_dir_arima)
 duration_arima = time.time() - start_time
 results_list.append({"Model": "ARIMA", "Type": "Time Series", "Accuracy": acc_arima, "AUC": np.nan, "Time (s)": duration_arima})
 
-# TBATS
-start_time = time.time()
-print("  Training TBATS...")
-estimator = TBATS(seasonal_periods=(252,)) # 1年周期を仮定
-model_tbats = estimator.fit(ts_train['y'])
-preds_tbats = model_tbats.forecast(steps=test_len)
-pred_dir_tbats = (preds_tbats > ts_test['y'].shift(1).values).astype(int)[1:]
-acc_tbats = accuracy_score(y_true_dir, pred_dir_tbats)
-duration_tbats = time.time() - start_time
-results_list.append({"Model": "TBATS", "Type": "Time Series", "Accuracy": acc_tbats, "AUC": np.nan, "Time (s)": duration_tbats})
+# TBATS (optional)
+if _tbats_available:
+    start_time = time.time()
+    print("  Training TBATS...")
+    estimator = TBATS(seasonal_periods=(252,))
+    model_tbats = estimator.fit(ts_train['y'])
+    preds_tbats = model_tbats.forecast(steps=test_len)
+    pred_dir_tbats = (preds_tbats > ts_test['y'].shift(1).values).astype(int)[1:]
+    acc_tbats = accuracy_score(y_true_dir, pred_dir_tbats)
+    duration_tbats = time.time() - start_time
+    results_list.append({"Model": "TBATS", "Type": "Time Series", "Accuracy": acc_tbats, "AUC": np.nan, "Time (s)": duration_tbats})
+else:
+    print(f"  Skipping TBATS due to import error: {_tbats_error}")
 
 # Prophet
 start_time = time.time()
@@ -159,4 +168,6 @@ print(results_df.to_string())
 
 best_model_info = results_df.iloc[0]
 print("\n--- 結論 ---")
-print(f"評価したモデルの中で、最も精度が高かったのは「{best_model_info['Model']}」であり、その正解率は {best_model_info['Accuracy']:.4f} でした。")
+print(
+    f"評価したモデルの中で、最も精度が高かったのは「{best_model_info['Model']}」であり、その正解率は {best_model_info['Accuracy']:.4f} でした。"
+)
