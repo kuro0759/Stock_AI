@@ -18,6 +18,7 @@ XGBoost × SHAP / I-SHAP の比較に
 pip install yfinance xgboost shap numpy pandas scikit-learn matplotlib
 """
 
+# 各種ライブラリのインポート
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -28,8 +29,10 @@ import os
 import warnings
 import logging
 
+# SHAPのログを非表示にする
 logging.getLogger("shap").setLevel(logging.ERROR)
 
+# 環境依存の警告を無視
 warnings.filterwarnings(
     "ignore",
     message=r"Could not find the number of physical cores.*",
@@ -58,12 +61,14 @@ KMEANS_N = 20  # 背景データ要約サンプル数
 # 分析モード: "effect_vs_interaction" または "obs_vs_intervention"
 #ANALYSIS_MODE = "effect_vs_interaction"
 ANALYSIS_MODE = "obs_vs_intervention"
+# SHAP解析のモードを設定
 
 # ───────────────────────────────────────────────
 # 1. データ取得・前処理
 # ───────────────────────────────────────────────
 print("1. データ取得・前処理を開始...")
 
+# yfinance で株価データを取得
 df = yf.download(
     TICKERS,
     start=START_DATE,
@@ -85,8 +90,10 @@ frames = [open_p, high_p, low_p, close_p]
 if vol_p is not None:
     frames.append(vol_p)
 
+# 各価格データをまとめる
 data = pd.concat(frames, axis=1).dropna()
 
+# 各銘柄ごとのテクニカル指標を計算
 for t in TICKERS:
     close_col = f"{t}_Close"
     high_col = f"{t}_High"
@@ -135,13 +142,14 @@ for t in TICKERS:
     data[f"{t}_Tenkan"] = tenkan
     data[f"{t}_Kijun"] = kijun
 
+# 過去リターンを遅行特徴量として追加
 for lag in [1, 2, 3, 5, 10]:
     data[f"{TARGET_TICKER}_Return_lag_{lag}"] = data[f"{TARGET_TICKER}_Return1D"].shift(lag)
 
 WINDOW_SIZE = 20
 data[f"{TARGET_TICKER}_Volatility_{WINDOW_SIZE}d"] = data[f"{TARGET_TICKER}_Close"].rolling(WINDOW_SIZE).std()
 data[f"{TARGET_TICKER}_High_vs_{WINDOW_SIZE}d"] = data[f"{TARGET_TICKER}_Close"] / data[f"{TARGET_TICKER}_Close"].rolling(WINDOW_SIZE).max()
-
+# 翌日の株価が上がるかどうかをターゲットに
 target_ret = data[f"{TARGET_TICKER}_Close"].pct_change().shift(-1)
 data[TARGET_COL] = (target_ret > 0).astype(int)
 
@@ -155,6 +163,7 @@ split_idx = int(len(X) * (1 - TEST_SIZE))
 X_tr, X_te = X[:split_idx], X[split_idx:]
 y_tr, y_te = y[:split_idx], y[split_idx:]
 
+# 特徴量を標準化
 scaler = StandardScaler()
 X_tr = scaler.fit_transform(X_tr)
 X_te = scaler.transform(X_te)
@@ -175,6 +184,7 @@ print(f"scale_pos_weight: {pos_weight:.2f}")
 # ───────────────────────────────────────────────
 print("\n2. モデル学習・予測を開始...")
 
+# ハイパーパラメータ探索範囲
 param_dist = {
     "n_estimators": [300, 400, 500, 600, 700],
     "max_depth": [3, 4, 5, 6, 7, 8, 9, 10],
@@ -201,6 +211,7 @@ search = RandomizedSearchCV(
     random_state=42,
     verbose=0,
 )
+# ランダムサーチで最適パラメータを探索
 search.fit(X_tr, y_tr)
 best_params = search.best_params_
 best_score = search.best_score_
@@ -240,8 +251,10 @@ print(f"F1       : {f1:.3f}")
 # ───────────────────────────────────────────────
 print("\n4. SHAP / I-SHAP の計算を開始...（時間がかかる場合があります）")
 
+# 背景データをK-meansで要約
 kmeans_obj = shap.kmeans(X_tr, KMEANS_N)
 background = getattr(kmeans_obj, "data", np.array(kmeans_obj))
+# SHAP/ISHAP のExplainerを生成
 
 if ANALYSIS_MODE == "effect_vs_interaction":
     explainer_shap = shap.TreeExplainer(
@@ -267,6 +280,7 @@ else:  # "obs_vs_intervention"
     )
 
 import contextlib
+# 計算時の警告を抑制
 with open(os.devnull, "w") as fnull:
     with contextlib.redirect_stderr(fnull):
         shap_vals = explainer_shap.shap_values(X_te)
@@ -288,6 +302,7 @@ else:
 
 baseline = X_tr.mean(axis=0)
 orig_preds = pred_proba
+# 選択外の特徴量を無効化した際の差異を計算
 
 def fidelity(mask_idx):
     if len(mask_idx) == 0:
@@ -296,6 +311,7 @@ def fidelity(mask_idx):
     Xc[:, mask_idx] = baseline[mask_idx]
     return np.mean(np.abs(orig_preds - model.predict_proba(Xc)[:, 1]))
 
+# Completeness と Fidelity の結果を保持
 results = []
 for K in range(MAX_K):
     top_sh = np.argsort(mean_abs_shap)[-K:] if K > 0 else []
@@ -326,6 +342,7 @@ print("\n5. グラフとCSVファイルを出力します...")
 
 k_list = [5, 10, MAX_K - 1]
 df_plot = df_res[df_res["K"].isin(k_list)]
+# 結果をグラフ用に抽出
 x = np.arange(len(k_list))
 
 plt.figure(figsize=(8, 4))
@@ -370,6 +387,7 @@ plt.legend(); plt.tight_layout()
 plt.savefig("prediction_vs_truth.png", dpi=300)
 plt.close()
 
+# 上位特徴量をCSVに保存
 csv_path = os.path.join(os.path.dirname(__file__), "top_shap_ishap_elements.csv")
 with open(csv_path, "w", newline="", encoding="utf-8") as f:
     writer = csv.writer(f)
